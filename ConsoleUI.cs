@@ -1,4 +1,5 @@
 ﻿
+using System.Diagnostics.Metrics;
 using Mono.Cecil;
 
 public class ConsoleUI {
@@ -131,6 +132,50 @@ public class ConsoleUI {
 		Console.Write (sb.ToString ());
 	}
 
+	void PrintTable(IList<(string, string, string, string, string)> rows)
+	{
+		var rowCount = 5;
+		var maxSize = new int[rowCount + 1];
+		for (var i = 0; i < rows.Count; i++)
+		{
+			var row = rows[i];
+			var ituple = (System.Runtime.CompilerServices.ITuple)row;
+			for (var k = 0; k < rowCount; k++)
+				maxSize[k + 1] = Math.Max(maxSize[k + 1], ((string?)ituple [k])?.Length ?? 0);
+		}
+		maxSize[0] = rows.Count.ToString().Length;
+
+		var sb = new StringBuilder();
+		for (var i = 0; i < rows.Count; i++)
+		{
+			var row = rows[i];
+			if (i > 0)
+			{
+				var number = i.ToString();
+				sb.Append(' ', maxSize[0] - number.Length);
+				sb.Append(number);
+				sb.Append(")");
+			}
+			else
+			{
+				sb.Append(' ', maxSize[0]);
+			}
+			sb.Append(cellSeparator);
+
+			var ituple = (System.Runtime.CompilerServices.ITuple)row;
+			for (var k = 0; k < rowCount; k++)
+			{
+				var rowValue = (string?)ituple[k];
+				sb.Append(rowValue);
+				sb.Append(' ', maxSize[k + 1] - (rowValue?.Length ?? 0));
+				if (k < rowCount - 1)
+					sb.Append(cellSeparator);
+			}
+			sb.AppendLine();
+		}
+		Console.Write(sb.ToString());
+	}
+
 	public void RunAssemblies ()
 	{
 		ReportSortMode sortMode = ReportSortMode.ByName;
@@ -231,49 +276,98 @@ public class ConsoleUI {
 
 	public void RunAssembly (AssemblyInfo info)
 	{
-		ReportSortMode sortMode = ReportSortMode.ByName;
+		var sortMode = ReportSortMode.ByName;
+		var enableAssemblyDrilling = false;
+		var enableTypeDrilling = false;
 
 		while (true) {
-			Console.Clear ();
-			Console.WriteLine ($"Assembly size report for {report.Input}: {info.Assembly.Name.Name}");
-			Console.WriteLine ($"");
+			Console.Clear();
+			Console.WriteLine($"Assembly size report for {report.Input}: {info.Assembly.Name.Name}");
+			Console.WriteLine($"");
 
 			var ad = info.Assembly;
 			var module = ad.MainModule;
 
 			if (module.AssemblyReferences.Count == 0) {
-				Console.WriteLine ($"This assembly references no other assemblies");
+				Console.WriteLine($"This assembly references no other assemblies");
 			} else {
-				Console.WriteLine ($"This assembly references {module.AssemblyReferences.Count} other assemblies:");
-				foreach (var ar in module.AssemblyReferences.OrderBy (v => v.FullName))
-					Console.WriteLine ($"    {ar.Name}");
+				Console.WriteLine($"This assembly references {module.AssemblyReferences.Count} other assemblies:");
+				foreach (var ar in module.AssemblyReferences.OrderBy(v => v.FullName))
+					Console.WriteLine($"    {ar.Name}");
 			}
-			Console.WriteLine ();
+			Console.WriteLine();
+
+			var types = info.Types;
+			var sorted = types.Sort(sortMode).ToArray();
 
 			var referencedByOtherAssemblies = report.Assemblies.
-				Where (v => v.Assembly.MainModule.AssemblyReferences.Any (v => v.FullName == info.Assembly.FullName)).
-				Select (v => v.Assembly).
-				ToArray ();
+				Where(v => v.Assembly.MainModule.AssemblyReferences.Any(v => v.FullName == info.Assembly.FullName)).
+				Select(v => v.Assembly).
+				ToArray();
 			if (referencedByOtherAssemblies.Length == 0) {
-				Console.WriteLine ($"This assembly is not referenced by any other assembly");
+				Console.WriteLine($"This assembly is not referenced by any other assembly");
 			} else {
-				Console.WriteLine ($"This assembly is referenced by {referencedByOtherAssemblies.Length} other assemblies:");
-				foreach (var ar in referencedByOtherAssemblies.OrderBy (v => v.FullName))
-					Console.WriteLine ($"    {ar.Name}");
+				Console.WriteLine($"This assembly is referenced by {referencedByOtherAssemblies.Length} other assemblies:");
+				foreach (var ar in referencedByOtherAssemblies.OrderBy(v => v.FullName))
+					Console.WriteLine($"    {ar.Name}");
 			}
-			Console.WriteLine ();
+			Console.WriteLine();
 
-			Console.WriteLine ("Types in this assembly:");
-			var types = info.Types;
-			var sorted = types.Sort (sortMode).ToArray ();
-			var table = sorted.Select<TypeInfo, (string, string, string)> (v => new (v.Type.FullName, v.Members.Count.ToString (), v.ILSize.ToString ())).ToList ();
-			table.Insert (0, ("Type", "Members", "IL Size"));
+			Console.WriteLine("Types in this assembly:");
+			var typeReferencesInAssemblyMembers = new List<(TypeInfo, IEnumerable<IMemberDefinition>)>();
+
+			var table = sorted
+				.Select ((v) => {
+					AssemblyInfos? assembliesWithTypes = null;
+					IEnumerable<IMemberDefinition>? memberReferences = null;
+					if (enableAssemblyDrilling || enableTypeDrilling)
+					{
+						assembliesWithTypes = report.FindTypeReferencesInAssemblies(v.Type);
+						if (enableTypeDrilling)
+						{
+							memberReferences = report.FindMemberReferencesInOtherAssemblies(v);
+							if (memberReferences.Count () > 0)
+								typeReferencesInAssemblyMembers.Add((v, memberReferences));
+						}
+					}
+					return (
+						(string)v.Type.FullName,
+						v.Members.Count.ToString(),
+						v.ILSize.ToString(),
+						(assembliesWithTypes?.Count.ToString() ?? "<assembly drilling not enabled>"),
+						(enableTypeDrilling ? memberReferences?.Count().ToString() : "<type drilling not enabled>")!
+					);
+				})
+				.ToList ();
+
+			table.Insert (0, ("Type", "Members", "IL Size", "Type references in other assemblies", "Member references in other assemblies"));
 			PrintTable (table);
+
+			if (typeReferencesInAssemblyMembers.Count > 0)
+			{
+				Console.WriteLine();
+				Console.WriteLine("References to types in other assemblies:");
+				foreach (var entry in typeReferencesInAssemblyMembers)
+				{
+					var grouped = entry.Item2.GroupBy(v => v.DeclaringType.Module.Assembly);
+					Console.WriteLine($"    Type {entry.Item1.Type.FullName} is referenced in:");
+					foreach (var group in grouped)
+					{
+						Console.WriteLine($"        {group.Key.ToString()}");
+						foreach (var member in group)
+						{
+							Console.WriteLine($"            {member.ToString()}");
+						}
+					}
+				}
+			}
 
 			Console.WriteLine ($"");
 			Console.WriteLine ($"a) Sort types by name{(sortMode == ReportSortMode.ByName ? " [current mode]" : string.Empty)}");
 			Console.WriteLine ($"b) Sort types by member count{(sortMode == ReportSortMode.ByCount ? " [current mode]" : string.Empty)}");
 			Console.WriteLine ($"c) Sort types by IL size{(sortMode == ReportSortMode.ByILSize ? " [current mode]" : string.Empty)}");
+			Console.WriteLine ($"e) {(enableAssemblyDrilling ? "Disable" : "Enable")} assembly drilling");
+			Console.WriteLine ($"f) {(enableTypeDrilling ? "Disable" : "Enable")} type drilling");
 			Console.WriteLine ($"q) Quit");
 			Console.WriteLine ();
 
@@ -288,6 +382,12 @@ public class ConsoleUI {
 					return true;
 				case "c":
 					sortMode = ReportSortMode.ByILSize;
+					return true;
+				case "e":
+					enableAssemblyDrilling = !enableAssemblyDrilling;
+					return true;
+				case "f":
+					enableTypeDrilling = !enableTypeDrilling;
 					return true;
 				default:
 					return false;

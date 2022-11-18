@@ -1,7 +1,7 @@
 ﻿global using System;
 global using System.IO;
 global using System.Text;
-
+using System.Diagnostics.Metrics;
 using Mono.Cecil;
 
 class Resolver : DefaultAssemblyResolver {
@@ -86,26 +86,71 @@ public class AppSizeReport {
 			Replace (">", "&gt;");
 	}
 
+	public AssemblyInfos FindTypeReferencesInAssemblies(IEnumerable<TypeDefinition> types)
+	{
+		var rv = new AssemblyInfos();
+		foreach (var type in types)
+			FindTypeReferencesInAssemblies(type, rv);
+		return rv;
+	}
+
 	public AssemblyInfos FindTypeReferencesInAssemblies (TypeDefinition type)
 	{
 		var rv = new AssemblyInfos ();
-		foreach (var assembly in Assemblies) {
-			var references = assembly.Assembly.MainModule.GetTypeReferences ();
-			foreach (var r in references) {
-				try {
-					var rDef = r.Resolve ();
-					if (rDef == type) {
-						rv.Add (assembly);
+		FindTypeReferencesInAssemblies(type, rv);
+		return rv;
+	}
+
+	public void FindTypeReferencesInAssemblies(TypeDefinition type, AssemblyInfos infos)
+	{
+		foreach (var assembly in Assemblies)
+		{
+			var references = assembly.Assembly.MainModule.GetTypeReferences();
+			foreach (var r in references)
+			{
+				try
+				{
+					var rDef = r.Resolve();
+					if (rDef == type)
+					{
+						infos.Add(assembly);
 						break;
 					}
-				} catch (Exception e) {
-					Console.Error.WriteLine (e.Message);
+				}
+				catch (Exception e)
+				{
+					Console.Error.WriteLine(e.Message);
+				}
+			}
+		}
+	}
+
+	public IEnumerable<IMemberDefinition> FindMemberReferencesInOtherAssemblies(TypeInfo type)
+	{
+		var rv = new List<IMemberDefinition> ();
+		var members = type.Members;
+		foreach (var assembly in Assemblies)
+		{
+			var references = assembly.Assembly.MainModule.GetMemberReferences();
+			foreach (var r in references)
+			{
+				try
+				{
+					var rDef = r.Resolve();
+					if (members.Any (v => v.Member == rDef))
+					{
+						assembly.FindMemberReferences(rDef, rv);
+						break;
+					}
+				}
+				catch (Exception e)
+				{
+					Console.Error.WriteLine(e.Message);
 				}
 			}
 		}
 		return rv;
 	}
-
 	public AssemblyInfos FindMemberReferencesInOtherAssemblies (IMemberDefinition member)
 	{
 		var rv = new AssemblyInfos ();
@@ -306,7 +351,7 @@ public class AssemblyInfo {
 			return true;
 
 		if (depth >= 20) {
-			Console.WriteLine ("STOP");
+			Console.WriteLine ($"STOP {typeReference}          {reference}");
 			return false;
 		}
 
